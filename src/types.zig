@@ -20,6 +20,10 @@ pub const EntityKind = enum(u8) {
     BuildVersionCommand = 13,
     BuildToolVersion = 14,
     Gap = 15,
+    SymbolTableRegion = 16,
+    StringTableRegion = 17,
+    IndirectSymbolTableRegion = 18,
+    RelocationInfoRegion = 19,
 };
 
 pub const EntityId = extern struct {
@@ -61,6 +65,7 @@ pub const DiagnosticCode = enum(u8) {
     load_cmd_typed_truncated = 15,
     load_cmd_sections_truncated = 16,
     load_cmd_tools_truncated = 17,
+    linkedit_region_out_of_bounds = 18,
 };
 
 pub const DiagnosticSeverity = enum(u8) {

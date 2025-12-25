@@ -7,11 +7,13 @@ pub fn parseLoadCommands(
     result: anytype,
     file: std.fs.File,
     slice_entity: types.Entity,
+    slice_id: types.EntityId,
     header_id: types.EntityId,
     header_size: u64,
     ncmds: u32,
     sizeofcmds: u32,
     endian: types.Endianness,
+    is_64: bool,
 ) !void {
     const header_end = std.math.add(u64, slice_entity.range.offset, header_size) catch {
         try result.addDiagnostic(.load_cmd_region_out_of_bounds, .Error, slice_entity.range);
@@ -92,7 +94,18 @@ pub fn parseLoadCommands(
         try result.addContainment(.Owns, region_id, cmd_id);
         try result.load_commands.append(.{ .cmd = cmd, .cmdsize = cmdsize, .entity = cmd_id });
 
-        const parsed = try typed_cmds.parseTypedLoadCommand(result, file, cmd_id, cmd, cmd_offset, cmdsize, cmd_endian);
+        const parsed = try typed_cmds.parseTypedLoadCommand(
+            result,
+            file,
+            slice_entity,
+            slice_id,
+            cmd_id,
+            cmd,
+            cmd_offset,
+            cmdsize,
+            cmd_endian,
+            is_64,
+        );
         if (parsed.handled and parsed.consumed < cmdsize) {
             const pad_offset = cmd_offset + parsed.consumed;
             const pad_size = cmdsize - parsed.consumed;

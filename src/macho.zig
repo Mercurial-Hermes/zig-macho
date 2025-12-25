@@ -339,7 +339,18 @@ fn parseSliceHeaders(result: *ParseResult, file: std.fs.File) !void {
             .entity = header_id,
         });
 
-        try load_cmds.parseLoadCommands(result, file, slice_entity, header_id, header_size, ncmds, sizeofcmds, magic.endian);
+        try load_cmds.parseLoadCommands(
+            result,
+            file,
+            slice_entity,
+            slice_id,
+            header_id,
+            header_size,
+            ncmds,
+            sizeofcmds,
+            magic.endian,
+            magic.is_64,
+        );
     }
 }
 

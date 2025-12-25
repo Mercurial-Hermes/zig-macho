@@ -7,20 +7,49 @@ const TypedParseResult = struct {
     consumed: u64,
 };
 
+fn emitLinkeditRegion(
+    result: anytype,
+    slice_entity: types.Entity,
+    slice_id: types.EntityId,
+    kind: types.EntityKind,
+    offset: u32,
+    size: u64,
+) !void {
+    if (size == 0) return;
+
+    const region_id = try result.addEntity(.{
+        .kind = kind,
+        .range = .{ .offset = offset, .size = size },
+        .identity = .{ .index = 0 },
+    });
+    try result.addContainment(.Owns, slice_id, region_id);
+
+    const slice_start = slice_entity.range.offset;
+    const slice_end = std.math.add(u64, slice_entity.range.offset, slice_entity.range.size) catch slice_entity.range.offset;
+    const region_end = std.math.add(u64, offset, size) catch offset;
+
+    if (offset < slice_start or region_end > slice_end or region_end > result.file_size) {
+        try result.addDiagnostic(.linkedit_region_out_of_bounds, .Error, .{ .offset = offset, .size = size });
+    }
+}
+
 // Stage: typed load command refinements (structural only).
 pub fn parseTypedLoadCommand(
     result: anytype,
     file: std.fs.File,
+    slice_entity: types.Entity,
+    slice_id: types.EntityId,
     cmd_id: types.EntityId,
     cmd: u32,
     cmd_offset: u64,
     cmdsize: u32,
     endian: std.builtin.Endian,
+    is_64: bool,
 ) !TypedParseResult {
     return switch (cmd) {
         0x19 => parseSegment64(result, file, cmd_id, cmd_offset, cmdsize, endian),
-        0x2 => parseSymtab(result, file, cmd_id, cmd_offset, cmdsize, endian),
-        0xb => parseDysymtab(result, file, cmd_id, cmd_offset, cmdsize, endian),
+        0x2 => parseSymtab(result, file, cmd_id, slice_entity, slice_id, cmd_offset, cmdsize, endian, is_64),
+        0xb => parseDysymtab(result, file, cmd_id, slice_entity, slice_id, cmd_offset, cmdsize, endian),
         0x1b => parseUuid(result, file, cmd_id, cmd_offset, cmdsize),
         0x32 => parseBuildVersion(result, file, cmd_id, cmd_offset, cmdsize, endian),
         else => .{ .handled = false, .consumed = 0 },
@@ -158,9 +187,12 @@ fn parseSymtab(
     result: anytype,
     file: std.fs.File,
     cmd_id: types.EntityId,
+    slice_entity: types.Entity,
+    slice_id: types.EntityId,
     cmd_offset: u64,
     cmdsize: u32,
     endian: std.builtin.Endian,
+    is_64: bool,
 ) !TypedParseResult {
     const fixed_size: u64 = 24;
     if (cmdsize < fixed_size) {
@@ -196,6 +228,11 @@ fn parseSymtab(
         .entity = sym_id,
     });
 
+    const entry_size: u64 = if (is_64) 16 else 12;
+    const sym_size = std.math.mul(u64, @as(u64, nsyms), entry_size) catch 0;
+    try emitLinkeditRegion(result, slice_entity, slice_id, .SymbolTableRegion, symoff, sym_size);
+    try emitLinkeditRegion(result, slice_entity, slice_id, .StringTableRegion, stroff, strsize);
+
     return .{ .handled = true, .consumed = fixed_size };
 }
 
@@ -203,6 +240,8 @@ fn parseDysymtab(
     result: anytype,
     file: std.fs.File,
     cmd_id: types.EntityId,
+    slice_entity: types.Entity,
+    slice_id: types.EntityId,
     cmd_offset: u64,
     cmdsize: u32,
     endian: std.builtin.Endian,
@@ -282,6 +321,15 @@ fn parseDysymtab(
         .nlocrel_range = .{ .offset = cmd_offset + 76, .size = 4 },
         .entity = dysym_id,
     });
+
+    const indirect_size = std.math.mul(u64, @as(u64, nindirectsyms), 4) catch 0;
+    try emitLinkeditRegion(result, slice_entity, slice_id, .IndirectSymbolTableRegion, indirectsymoff, indirect_size);
+
+    const extrel_size = std.math.mul(u64, @as(u64, nextrel), 8) catch 0;
+    try emitLinkeditRegion(result, slice_entity, slice_id, .RelocationInfoRegion, extreloff, extrel_size);
+
+    const locrel_size = std.math.mul(u64, @as(u64, nlocrel), 8) catch 0;
+    try emitLinkeditRegion(result, slice_entity, slice_id, .RelocationInfoRegion, locreloff, locrel_size);
 
     return .{ .handled = true, .consumed = fixed_size };
 }

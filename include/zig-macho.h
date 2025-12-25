@@ -22,6 +22,10 @@ enum {
     EntityKind_BuildVersionCommand = 13,
     EntityKind_BuildToolVersion = 14,
     EntityKind_Gap = 15,
+    EntityKind_SymbolTableRegion = 16,
+    EntityKind_StringTableRegion = 17,
+    EntityKind_IndirectSymbolTableRegion = 18,
+    EntityKind_RelocationInfoRegion = 19,
 };
 
 typedef struct ByteRange {
@@ -48,6 +52,7 @@ enum {
     DiagnosticCode_load_cmd_typed_truncated = 15,
     DiagnosticCode_load_cmd_sections_truncated = 16,
     DiagnosticCode_load_cmd_tools_truncated = 17,
+    DiagnosticCode_linkedit_region_out_of_bounds = 18,
 };
 
 typedef uint8_t DiagnosticSeverity;

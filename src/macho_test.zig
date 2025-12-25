@@ -124,6 +124,33 @@ fn coversRange(ranges: []macho.types.ByteRange, container: macho.types.ByteRange
     return cursor >= container.offset + container.size;
 }
 
+fn findEntity(
+    result: *const macho.ParseResult,
+    kind: macho.types.EntityKind,
+    range: macho.types.ByteRange,
+) ?macho.types.EntityId {
+    for (result.entities.items, 0..) |entity, idx| {
+        if (entity.kind != kind) continue;
+        if (entity.range.offset == range.offset and entity.range.size == range.size) {
+            return .{ .index = @intCast(idx) };
+        }
+    }
+    return null;
+}
+
+fn childrenOrderedByOffset(result: *const macho.ParseResult, parent: macho.types.EntityId) bool {
+    var last_offset: ?u64 = null;
+    for (result.containments.items) |edge| {
+        if (edge.parent.index != parent.index) continue;
+        const child = result.entities.items[@intCast(edge.child.index)];
+        if (last_offset) |prev| {
+            if (child.range.offset < prev) return false;
+        }
+        last_offset = child.range.offset;
+    }
+    return true;
+}
+
 test "parse: file size is detected" {
     const allocator = std.testing.allocator;
 
@@ -1118,6 +1145,177 @@ test "identity: gap participates in sibling ordering" {
     const gap_ident = gap_identity orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 1), gap_ident.ordinal);
     _ = slice_entity;
+}
+
+test "linkedit: regions emitted with correct ranges" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const symtab_cmdsize: u32 = 24;
+    const dysymtab_cmdsize: u32 = 80;
+    const sizeofcmds: u32 = symtab_cmdsize + dysymtab_cmdsize;
+    const file_size: usize = 256;
+
+    const symoff: u32 = 160;
+    const nsyms: u32 = 2;
+    const sym_size: u32 = 32;
+    const stroff: u32 = 192;
+    const strsize: u32 = 16;
+    const indirectsymoff: u32 = 208;
+    const nindirectsyms: u32 = 2;
+    const extreloff: u32 = 216;
+    const nextrel: u32 = 1;
+    const locreloff: u32 = 224;
+    const nlocrel: u32 = 1;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 2, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    const symtab_offset = header_size;
+    writeU32(buf, symtab_offset + 0, 0x2, .big);
+    writeU32(buf, symtab_offset + 4, symtab_cmdsize, .big);
+    writeU32(buf, symtab_offset + 8, symoff, .big);
+    writeU32(buf, symtab_offset + 12, nsyms, .big);
+    writeU32(buf, symtab_offset + 16, stroff, .big);
+    writeU32(buf, symtab_offset + 20, strsize, .big);
+
+    const dysymtab_offset = header_size + symtab_cmdsize;
+    writeU32(buf, dysymtab_offset + 0, 0xb, .big);
+    writeU32(buf, dysymtab_offset + 4, dysymtab_cmdsize, .big);
+    writeU32(buf, dysymtab_offset + 56, indirectsymoff, .big);
+    writeU32(buf, dysymtab_offset + 60, nindirectsyms, .big);
+    writeU32(buf, dysymtab_offset + 64, extreloff, .big);
+    writeU32(buf, dysymtab_offset + 68, nextrel, .big);
+    writeU32(buf, dysymtab_offset + 72, locreloff, .big);
+    writeU32(buf, dysymtab_offset + 76, nlocrel, .big);
+
+    const path = try writeTempFile(tmp, allocator, "linkedit.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    const slice_id = result.slice_entities.items[0];
+
+    const sym_id = findEntity(&result, macho.types.EntityKind.SymbolTableRegion, .{ .offset = symoff, .size = sym_size }) orelse return error.TestUnexpectedResult;
+    const str_id = findEntity(&result, macho.types.EntityKind.StringTableRegion, .{ .offset = stroff, .size = strsize }) orelse return error.TestUnexpectedResult;
+    const ind_id = findEntity(&result, macho.types.EntityKind.IndirectSymbolTableRegion, .{ .offset = indirectsymoff, .size = 8 }) orelse return error.TestUnexpectedResult;
+    const ext_id = findEntity(&result, macho.types.EntityKind.RelocationInfoRegion, .{ .offset = extreloff, .size = 8 }) orelse return error.TestUnexpectedResult;
+    const loc_id = findEntity(&result, macho.types.EntityKind.RelocationInfoRegion, .{ .offset = locreloff, .size = 8 }) orelse return error.TestUnexpectedResult;
+
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, sym_id));
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, str_id));
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, ind_id));
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, ext_id));
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, loc_id));
+
+    try std.testing.expect(childrenOrderedByOffset(&result, slice_id));
+}
+
+test "linkedit: out-of-bounds regions emit diagnostics" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const symtab_cmdsize: u32 = 24;
+    const sizeofcmds: u32 = symtab_cmdsize;
+    const file_size: usize = 64;
+
+    const symoff: u32 = 1000;
+    const nsyms: u32 = 1;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x2, .big);
+    writeU32(buf, header_size + 4, symtab_cmdsize, .big);
+    writeU32(buf, header_size + 8, symoff, .big);
+    writeU32(buf, header_size + 12, nsyms, .big);
+
+    const path = try writeTempFile(tmp, allocator, "linkedit_oob.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.items.len);
+    try std.testing.expectEqual(macho.types.DiagnosticCode.linkedit_region_out_of_bounds, result.diagnostics.items[0].code);
+
+    const sym_id = findEntity(&result, macho.types.EntityKind.SymbolTableRegion, .{ .offset = symoff, .size = 16 }) orelse return error.TestUnexpectedResult;
+    const slice_id = result.slice_entities.items[0];
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, sym_id));
+}
+
+test "identity: stable with linkedit regions" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const symtab_cmdsize: u32 = 24;
+    const sizeofcmds: u32 = symtab_cmdsize;
+    const file_size: usize = 128;
+
+    const symoff: u32 = 96;
+    const nsyms: u32 = 1;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x2, .big);
+    writeU32(buf, header_size + 4, symtab_cmdsize, .big);
+    writeU32(buf, header_size + 8, symoff, .big);
+    writeU32(buf, header_size + 12, nsyms, .big);
+
+    const path = try writeTempFile(tmp, allocator, "linkedit_id.bin", buf);
+    defer allocator.free(path);
+
+    var first = try macho.parseFile(allocator, path);
+    defer first.deinit();
+    var second = try macho.parseFile(allocator, path);
+    defer second.deinit();
+
+    const sym_a = findEntity(&first, macho.types.EntityKind.SymbolTableRegion, .{ .offset = symoff, .size = 16 }) orelse return error.TestUnexpectedResult;
+    const sym_b = findEntity(&second, macho.types.EntityKind.SymbolTableRegion, .{ .offset = symoff, .size = 16 }) orelse return error.TestUnexpectedResult;
+    const id_a = first.entities.items[@intCast(sym_a.index)].identity.index;
+    const id_b = second.entities.items[@intCast(sym_b.index)].identity.index;
+    try std.testing.expectEqual(id_a, id_b);
 }
 
 test "thin: load command region out of bounds emits diagnostic" {
