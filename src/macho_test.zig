@@ -47,6 +47,35 @@ fn hasContainment(
     return false;
 }
 
+fn findParent(
+    result: *const macho.ParseResult,
+    kind: macho.types.ContainmentKind,
+    child: macho.types.EntityId,
+) ?macho.types.EntityId {
+    for (result.containments.items) |edge| {
+        if (edge.kind == kind and edge.child.index == child.index) {
+            return edge.parent;
+        }
+    }
+    return null;
+}
+
+fn rangesNonOverlappingAndContained(ranges: []const macho.types.ByteRange, container: macho.types.ByteRange) bool {
+    var i: usize = 0;
+    while (i < ranges.len) : (i += 1) {
+        const a = ranges[i];
+        if (a.size == 0) return false;
+        if (a.offset < container.offset) return false;
+        if (a.offset + a.size > container.offset + container.size) return false;
+        var j: usize = i + 1;
+        while (j < ranges.len) : (j += 1) {
+            const b = ranges[j];
+            if (!(a.offset + a.size <= b.offset or b.offset + b.size <= a.offset)) return false;
+        }
+    }
+    return true;
+}
+
 test "parse: file size is detected" {
     const allocator = std.testing.allocator;
 
@@ -334,7 +363,7 @@ test "thin: load command region and commands are ordered" {
     writeU32(buf, cmd0_offset + 4, cmd0_size, .big);
 
     const cmd1_offset = cmd0_offset + cmd0_size;
-    writeU32(buf, cmd1_offset + 0, 0x2, .big);
+    writeU32(buf, cmd1_offset + 0, 0x3, .big);
     writeU32(buf, cmd1_offset + 4, cmd1_size, .big);
 
     const path = try writeTempFile(tmp, allocator, "loadcmds.bin", buf);
@@ -387,7 +416,7 @@ test "thin: load command region owns load commands" {
     writeU32(buf, cmd0_offset + 4, cmd0_size, .big);
 
     const cmd1_offset = cmd0_offset + cmd0_size;
-    writeU32(buf, cmd1_offset + 0, 0x2, .big);
+    writeU32(buf, cmd1_offset + 0, 0x3, .big);
     writeU32(buf, cmd1_offset + 4, cmd1_size, .big);
 
     const path = try writeTempFile(tmp, allocator, "loadcmds_owns.bin", buf);
@@ -405,6 +434,321 @@ test "thin: load command region owns load commands" {
 
     try std.testing.expect(hasContainment(&result, .Owns, region_id, cmd0_id));
     try std.testing.expect(hasContainment(&result, .Owns, region_id, cmd1_id));
+}
+
+test "thin64: typed load commands and sections are contained" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const segment_cmdsize: u32 = 72 + 80;
+    const symtab_cmdsize: u32 = 24;
+    const uuid_cmdsize: u32 = 24;
+    const build_cmdsize: u32 = 24 + 8;
+    const sizeofcmds: u32 = segment_cmdsize + symtab_cmdsize + uuid_cmdsize + build_cmdsize;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 4, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    var offset: usize = header_size;
+
+    writeU32(buf, offset + 0, 0x19, .big);
+    writeU32(buf, offset + 4, segment_cmdsize, .big);
+    writeU32(buf, offset + 64, 1, .big);
+    const sect_offset = offset + 72;
+    writeU32(buf, sect_offset + 48, 0, .big);
+    writeU32(buf, sect_offset + 52, 0, .big);
+    writeU32(buf, sect_offset + 56, 0, .big);
+    writeU32(buf, sect_offset + 60, 0, .big);
+    writeU32(buf, sect_offset + 64, 0, .big);
+    writeU32(buf, sect_offset + 68, 0, .big);
+    writeU32(buf, sect_offset + 72, 0, .big);
+    writeU32(buf, sect_offset + 76, 0, .big);
+
+    offset += segment_cmdsize;
+    writeU32(buf, offset + 0, 0x2, .big);
+    writeU32(buf, offset + 4, symtab_cmdsize, .big);
+    offset += symtab_cmdsize;
+    writeU32(buf, offset + 0, 0x1b, .big);
+    writeU32(buf, offset + 4, uuid_cmdsize, .big);
+    offset += uuid_cmdsize;
+    writeU32(buf, offset + 0, 0x32, .big);
+    writeU32(buf, offset + 4, build_cmdsize, .big);
+    writeU32(buf, offset + 20, 1, .big);
+
+    const path = try writeTempFile(tmp, allocator, "typed.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.segment64_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.section64_records.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.symtab_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.uuid_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.build_version_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.build_tool_versions.items.len);
+
+    const seg_id = result.segment64_commands.items[0].entity;
+    const section_id = result.section64_records.items[0].entity;
+    const seg_parent = findParent(&result, .Owns, seg_id) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(hasContainment(&result, .Owns, seg_parent, seg_id));
+    try std.testing.expect(hasContainment(&result, .Owns, seg_id, section_id));
+
+    const seg_entity = entityAt(&result, seg_id);
+    try std.testing.expectEqual(@as(u64, header_size), seg_entity.range.offset);
+    try std.testing.expectEqual(@as(u64, 72), seg_entity.range.size);
+
+    const section_entity = entityAt(&result, section_id);
+    try std.testing.expectEqual(@as(u64, header_size + 72), section_entity.range.offset);
+    try std.testing.expectEqual(@as(u64, 80), section_entity.range.size);
+}
+
+test "thin: load command region padding is explicit" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const sizeofcmds: u32 = 16;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x1, .big);
+    writeU32(buf, header_size + 4, 8, .big);
+
+    const path = try writeTempFile(tmp, allocator, "region_pad.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    var pad_count: usize = 0;
+    for (result.entities.items) |entity| {
+        if (entity.kind == macho.types.EntityKind.LoadCommandPadding) pad_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.load_cmd_regions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), pad_count);
+}
+
+test "thin64: segment command too small emits diagnostic" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const segment_cmdsize: u32 = 64;
+    const sizeofcmds: u32 = segment_cmdsize;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x19, .big);
+    writeU32(buf, header_size + 4, segment_cmdsize, .big);
+
+    const path = try writeTempFile(tmp, allocator, "seg_small.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.segment64_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.items.len);
+    try std.testing.expectEqual(macho.types.DiagnosticCode.load_cmd_typed_truncated, result.diagnostics.items[0].code);
+}
+
+test "thin64: truncated section table emits diagnostic" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const segment_cmdsize: u32 = 72 + 80;
+    const sizeofcmds: u32 = segment_cmdsize;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x19, .big);
+    writeU32(buf, header_size + 4, segment_cmdsize, .big);
+    writeU32(buf, header_size + 64, 2, .big);
+
+    const path = try writeTempFile(tmp, allocator, "sect_trunc.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.section64_records.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.items.len);
+    try std.testing.expectEqual(macho.types.DiagnosticCode.load_cmd_sections_truncated, result.diagnostics.items[0].code);
+}
+
+test "thin64: dysymtab field ranges are contained and non-overlapping" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const cmdsize: u32 = 80;
+    const sizeofcmds: u32 = cmdsize;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    writeU32(buf, header_size + 0, 0xb, .big);
+    writeU32(buf, header_size + 4, cmdsize, .big);
+
+    const path = try writeTempFile(tmp, allocator, "dysymtab.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.dysymtab_commands.items.len);
+    const dysym_id = result.dysymtab_commands.items[0].entity;
+    const parent_id = findParent(&result, .Owns, dysym_id) orelse return error.TestUnexpectedResult;
+    const parent_entity = entityAt(&result, parent_id);
+    try std.testing.expectEqual(macho.types.EntityKind.LoadCommand, parent_entity.kind);
+
+    const dysym_entity = entityAt(&result, dysym_id);
+    const d = result.dysymtab_commands.items[0];
+    const ranges = [_]macho.types.ByteRange{
+        d.cmd_range,
+        d.cmdsize_range,
+        d.ilocalsym_range,
+        d.nlocalsym_range,
+        d.iextdefsym_range,
+        d.nextdefsym_range,
+        d.iundefsym_range,
+        d.nundefsym_range,
+        d.tocoff_range,
+        d.ntoc_range,
+        d.modtaboff_range,
+        d.nmodtab_range,
+        d.extrefsymoff_range,
+        d.nextrefsyms_range,
+        d.indirectsymoff_range,
+        d.nindirectsyms_range,
+        d.extreloff_range,
+        d.nextrel_range,
+        d.locreloff_range,
+        d.nlocrel_range,
+    };
+    try std.testing.expect(rangesNonOverlappingAndContained(&ranges, dysym_entity.range));
+}
+
+test "thin64: build version with zero tools emits padding" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 32;
+    const cmdsize: u32 = 32;
+    const sizeofcmds: u32 = cmdsize;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedfacf, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, 28, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x32, .big);
+    writeU32(buf, header_size + 4, cmdsize, .big);
+    writeU32(buf, header_size + 20, 0, .big);
+
+    const path = try writeTempFile(tmp, allocator, "build_zero.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.build_version_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.build_tool_versions.items.len);
+
+    var pad_count: usize = 0;
+    var pad_entity_id: ?macho.types.EntityId = null;
+    for (result.entities.items, 0..) |entity, idx| {
+        if (entity.kind == macho.types.EntityKind.LoadCommandPadding) {
+            pad_count += 1;
+            pad_entity_id = .{ .index = @intCast(idx) };
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), pad_count);
+
+    const cmd_id = result.load_commands.items[0].entity;
+    const pad_id = pad_entity_id orelse return error.TestUnexpectedResult;
+    try std.testing.expect(hasContainment(&result, .Owns, cmd_id, pad_id));
 }
 
 test "thin: load command region out of bounds emits diagnostic" {
