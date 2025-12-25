@@ -137,6 +137,9 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     // Stage: slice header parsing and load command description.
     try parseSliceHeaders(&result, file);
 
+    // Stage: structural closure (gaps and ordering).
+    try emitGaps(&result);
+
     return result;
 }
 
@@ -328,6 +331,142 @@ fn parseSliceHeaders(result: *ParseResult, file: std.fs.File) !void {
 
         try load_cmds.parseLoadCommands(result, file, slice_entity, header_id, header_size, ncmds, sizeofcmds, magic.endian);
     }
+}
+
+const ChildRange = struct {
+    child: types.EntityId,
+    range: types.ByteRange,
+};
+
+fn shouldEmitGaps(kind: types.EntityKind) bool {
+    return switch (kind) {
+        .File, .Slice, .LoadCommandsRegion, .LoadCommand => true,
+        else => false,
+    };
+}
+
+fn emitGaps(result: *ParseResult) !void {
+    const allocator = result.allocator;
+    const initial_entities_len = result.entities.items.len;
+
+    var children = try allocator.alloc(std.ArrayList(ChildRange), initial_entities_len);
+    defer {
+        var idx: usize = 0;
+        while (idx < initial_entities_len) : (idx += 1) {
+            children[idx].deinit();
+        }
+        allocator.free(children);
+    }
+
+    var i: usize = 0;
+    while (i < initial_entities_len) : (i += 1) {
+        children[i] = std.ArrayList(ChildRange).init(allocator);
+    }
+
+    for (result.containments.items) |edge| {
+        const parent_index: usize = @intCast(edge.parent.index);
+        const child_index: usize = @intCast(edge.child.index);
+        if (parent_index >= initial_entities_len or child_index >= initial_entities_len) continue;
+        const child_entity = result.entities.items[child_index];
+        try children[parent_index].append(.{ .child = edge.child, .range = child_entity.range });
+    }
+
+    i = 0;
+    while (i < initial_entities_len) : (i += 1) {
+        const parent_entity = result.entities.items[i];
+        if (!shouldEmitGaps(parent_entity.kind)) continue;
+        if (children[i].items.len == 0) continue;
+
+        const parent_start = parent_entity.range.offset;
+        const parent_end = std.math.add(u64, parent_entity.range.offset, parent_entity.range.size) catch parent_entity.range.offset;
+
+        std.sort.heap(ChildRange, children[i].items, {}, struct {
+            fn lessThan(_: void, a: ChildRange, b: ChildRange) bool {
+                if (a.range.offset == b.range.offset) {
+                    if (a.range.size == b.range.size) return a.child.index < b.child.index;
+                    return a.range.size < b.range.size;
+                }
+                return a.range.offset < b.range.offset;
+            }
+        }.lessThan);
+
+        var cursor = parent_start;
+        for (children[i].items) |child| {
+            const child_start = child.range.offset;
+            const child_end = std.math.add(u64, child.range.offset, child.range.size) catch child.range.offset;
+            if (child_end <= parent_start or child_start >= parent_end) continue;
+            const clamped_start = if (child_start < parent_start) parent_start else child_start;
+            const clamped_end = if (child_end > parent_end) parent_end else child_end;
+            if (clamped_start > cursor) {
+                const gap_id = try result.addEntity(.{
+                    .kind = types.EntityKind.Gap,
+                    .range = .{ .offset = cursor, .size = clamped_start - cursor },
+                });
+                try result.addContainment(.Owns, .{ .index = @intCast(i) }, gap_id);
+            }
+            if (clamped_end > cursor) cursor = clamped_end;
+        }
+        if (cursor < parent_end) {
+            const gap_id = try result.addEntity(.{
+                .kind = types.EntityKind.Gap,
+                .range = .{ .offset = cursor, .size = parent_end - cursor },
+            });
+            try result.addContainment(.Owns, .{ .index = @intCast(i) }, gap_id);
+        }
+    }
+
+    try reorderContainments(result);
+}
+
+fn reorderContainments(result: *ParseResult) !void {
+    const allocator = result.allocator;
+    const entities_len = result.entities.items.len;
+
+    var buckets = try allocator.alloc(std.ArrayList(types.Containment), entities_len);
+    defer {
+        var idx: usize = 0;
+        while (idx < entities_len) : (idx += 1) {
+            buckets[idx].deinit();
+        }
+        allocator.free(buckets);
+    }
+
+    var i: usize = 0;
+    while (i < entities_len) : (i += 1) {
+        buckets[i] = std.ArrayList(types.Containment).init(allocator);
+    }
+
+    for (result.containments.items) |edge| {
+        const parent_index: usize = @intCast(edge.parent.index);
+        if (parent_index >= entities_len) continue;
+        try buckets[parent_index].append(edge);
+    }
+
+    const ctx = struct { result: *ParseResult }{ .result = result };
+    for (buckets) |*bucket| {
+        if (bucket.items.len == 0) continue;
+        std.sort.heap(types.Containment, bucket.items, ctx, struct {
+            fn lessThan(context: @TypeOf(ctx), a: types.Containment, b: types.Containment) bool {
+                const a_index: usize = @intCast(a.child.index);
+                const b_index: usize = @intCast(b.child.index);
+                const a_entity = context.result.entities.items[a_index];
+                const b_entity = context.result.entities.items[b_index];
+                if (a_entity.range.offset == b_entity.range.offset) {
+                    if (a_entity.range.size == b_entity.range.size) return a.child.index < b.child.index;
+                    return a_entity.range.size < b_entity.range.size;
+                }
+                return a_entity.range.offset < b_entity.range.offset;
+            }
+        }.lessThan);
+    }
+
+    var new_list = std.ArrayList(types.Containment).init(allocator);
+    for (buckets) |bucket| {
+        try new_list.appendSlice(bucket.items);
+    }
+
+    result.containments.deinit();
+    result.containments = new_list;
 }
 
 fn magicValue(magic: Magic) u32 {

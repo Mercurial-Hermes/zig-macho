@@ -65,6 +65,11 @@ All entities and diagnostics are range-first and deterministic.
 - Range: the exact padding span.
 - Containment: owned by LoadCommandsRegion or by a LoadCommand.
 
+### Gap
+- Represents: unclaimed bytes inside a container after structural closure.
+- Range: the exact gap span.
+- Containment: owned by File, Slice, LoadCommandsRegion, or LoadCommand.
+
 ### Segment64Command
 - Represents: the fixed LC_SEGMENT_64 header structure.
 - Range: fixed-size header portion of the command.
@@ -119,11 +124,19 @@ These semantics do not add interpretation; they clarify structural roles.
 6. Load command region parsing and generic LoadCommand emission
 7. Typed load command refinement (segment64, symtab, dysymtab, uuid, build_version)
 8. Section and tool record emission within typed commands
+9. Structural closure: gap emission and containment ordering by file offset
+
+## Identity Stability
+
+Structural identities are derived from containment and sibling ordering.
+
+Identity stability is an explicit design goal and will be guaranteed starting in v0.0.6.
+
+Prior to v0.0.6, entity ordering may change as structural closure logic is introduced.
 
 ## Determinism & Stability
 
 - Entities are emitted in file order; order is treated as data.
-- Entity identities are stable indexes within a single parse.
 - No hidden global state; all ownership is explicit in ParseResult.
 
 ## Consumer Contract

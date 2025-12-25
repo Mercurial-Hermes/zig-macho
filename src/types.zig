@@ -19,6 +19,7 @@ pub const EntityKind = enum(u8) {
     UuidCommand = 12,
     BuildVersionCommand = 13,
     BuildToolVersion = 14,
+    Gap = 15,
 };
 
 pub const EntityId = extern struct {

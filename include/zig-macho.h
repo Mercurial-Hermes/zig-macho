@@ -21,6 +21,7 @@ enum {
     EntityKind_UuidCommand = 12,
     EntityKind_BuildVersionCommand = 13,
     EntityKind_BuildToolVersion = 14,
+    EntityKind_Gap = 15,
 };
 
 typedef struct ByteRange {

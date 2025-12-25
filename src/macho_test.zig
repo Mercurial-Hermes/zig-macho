@@ -76,6 +76,39 @@ fn rangesNonOverlappingAndContained(ranges: []const macho.types.ByteRange, conta
     return true;
 }
 
+fn collectChildRanges(
+    allocator: std.mem.Allocator,
+    result: *const macho.ParseResult,
+    parent: macho.types.EntityId,
+) !std.ArrayList(macho.types.ByteRange) {
+    var list = std.ArrayList(macho.types.ByteRange).init(allocator);
+    for (result.containments.items) |edge| {
+        if (edge.parent.index != parent.index) continue;
+        const child = result.entities.items[@intCast(edge.child.index)];
+        try list.append(child.range);
+    }
+    return list;
+}
+
+fn coversRange(ranges: []macho.types.ByteRange, container: macho.types.ByteRange) bool {
+    if (ranges.len == 0) return false;
+    std.sort.heap(macho.types.ByteRange, ranges, {}, struct {
+        fn lessThan(_: void, a: macho.types.ByteRange, b: macho.types.ByteRange) bool {
+            if (a.offset == b.offset) return a.size < b.size;
+            return a.offset < b.offset;
+        }
+    }.lessThan);
+
+    var cursor = container.offset;
+    for (ranges) |r| {
+        if (r.offset > cursor) return false;
+        const end = r.offset + r.size;
+        if (end > cursor) cursor = end;
+        if (cursor >= container.offset + container.size) return true;
+    }
+    return cursor >= container.offset + container.size;
+}
+
 test "parse: file size is detected" {
     const allocator = std.testing.allocator;
 
@@ -749,6 +782,94 @@ test "thin64: build version with zero tools emits padding" {
     const cmd_id = result.load_commands.items[0].entity;
     const pad_id = pad_entity_id orelse return error.TestUnexpectedResult;
     try std.testing.expect(hasContainment(&result, .Owns, cmd_id, pad_id));
+}
+
+test "thin: slice gap emitted for trailing bytes" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file_size: usize = 64;
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 0, .big);
+    writeU32(buf, 20, 0, .big);
+    writeU32(buf, 24, 0, .big);
+
+    const path = try writeTempFile(tmp, allocator, "slice_gap.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    const slice_id = result.slice_entities.items[0];
+    var gap_id: ?macho.types.EntityId = null;
+    for (result.entities.items, 0..) |entity, idx| {
+        if (entity.kind != macho.types.EntityKind.Gap) continue;
+        if (entity.range.offset == 28 and entity.range.size == 36) {
+            gap_id = .{ .index = @intCast(idx) };
+            break;
+        }
+    }
+    const gap = gap_id orelse return error.TestUnexpectedResult;
+    try std.testing.expect(hasContainment(&result, .Owns, slice_id, gap));
+}
+
+test "fat: file gaps cover unused space" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const entry_size: usize = 20;
+    const header_size: usize = 8;
+    const nfat_arch: u32 = 1;
+    const slice_offset: u32 = 64;
+    const slice_size: u32 = 32;
+    const file_size: usize = slice_offset + slice_size;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xcafebabe, .big);
+    writeU32(buf, 4, nfat_arch, .big);
+
+    const entry0 = header_size + 0 * entry_size;
+    writeU32(buf, entry0 + 0, 0x0100000c, .big);
+    writeU32(buf, entry0 + 4, 0, .big);
+    writeU32(buf, entry0 + 8, slice_offset, .big);
+    writeU32(buf, entry0 + 12, slice_size, .big);
+    writeU32(buf, entry0 + 16, 0, .big);
+
+    writeU32(buf, slice_offset + 0, 0xfeedfacf, .big);
+    writeU32(buf, slice_offset + 4, 0x0100000c, .big);
+    writeU32(buf, slice_offset + 8, 0, .big);
+    writeU32(buf, slice_offset + 12, 2, .big);
+    writeU32(buf, slice_offset + 16, 0, .big);
+    writeU32(buf, slice_offset + 20, 0, .big);
+    writeU32(buf, slice_offset + 24, 0, .big);
+    writeU32(buf, slice_offset + 28, 0, .big);
+
+    const path = try writeTempFile(tmp, allocator, "file_gap.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    const file_id: macho.types.EntityId = .{ .index = 0 };
+    const file_entity = result.entities.items[0];
+    var ranges = try collectChildRanges(allocator, &result, file_id);
+    defer ranges.deinit();
+
+    try std.testing.expect(coversRange(ranges.items, file_entity.range));
 }
 
 test "thin: load command region out of bounds emits diagnostic" {
