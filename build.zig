@@ -6,7 +6,7 @@ pub fn build(b: *std.Build) void {
 
     const lib = b.addStaticLibrary(.{
         .name = "zig-macho",
-        .root_source_file = b.path("src/macho.zig"),
+        .root_source_file = b.path("src/abi.zig"),
         .target = target,
         .optimize = optimize,
     });
