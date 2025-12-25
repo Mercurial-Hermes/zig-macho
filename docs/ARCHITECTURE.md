@@ -17,7 +17,7 @@ It does not interpret runtime meaning, implement loader behavior, or present UI.
 The canonical parse result is a set of explicit tables plus a containment graph:
 
 - Entity table: ordered list of structural entities with byte ranges.
-- Metadata tables: typed records for specific entity kinds (FAT, MachHeader).
+- Metadata tables: typed records for specific entity kinds (FAT, MachHeader, load commands, typed commands, sections).
 - Containment graph: explicit parent/child relationships with a semantic kind.
 - Diagnostics: structured list of issues with severity and byte ranges.
 
@@ -50,11 +50,61 @@ All entities and diagnostics are range-first and deterministic.
 - Range: header size (32-bit or 64-bit) starting at slice offset.
 - Containment: owned by its Slice.
 
+### LoadCommandsRegion
+- Represents: the contiguous load command region following a MachHeader.
+- Range: `[header_end, header_end + sizeofcmds)`.
+- Containment: owned by its MachHeader; owns LoadCommand and LoadCommandPadding.
+
+### LoadCommand
+- Represents: one load command record in the load command region.
+- Range: `[offset, offset + cmdsize)`.
+- Containment: owned by LoadCommandsRegion; may own a typed command entity.
+
+### LoadCommandPadding
+- Represents: unclaimed bytes inside a load command or load command region.
+- Range: the exact padding span.
+- Containment: owned by LoadCommandsRegion or by a LoadCommand.
+
+### Segment64Command
+- Represents: the fixed LC_SEGMENT_64 header structure.
+- Range: fixed-size header portion of the command.
+- Containment: owned by its LoadCommand; owns Section64 records.
+
+### Section64
+- Represents: one fixed-layout section record in LC_SEGMENT_64.
+- Range: the section record bytes in the command.
+- Containment: owned by its Segment64Command.
+
+### SymtabCommand
+- Represents: the fixed LC_SYMTAB structure.
+- Range: fixed-size header portion of the command.
+- Containment: owned by its LoadCommand.
+
+### DysymtabCommand
+- Represents: the fixed LC_DYSYMTAB structure.
+- Range: fixed-size header portion of the command.
+- Containment: owned by its LoadCommand.
+
+### UuidCommand
+- Represents: the fixed LC_UUID structure.
+- Range: fixed-size header portion of the command.
+- Containment: owned by its LoadCommand.
+
+### BuildVersionCommand
+- Represents: the fixed LC_BUILD_VERSION structure.
+- Range: fixed-size header portion of the command.
+- Containment: owned by its LoadCommand; owns BuildToolVersion records.
+
+### BuildToolVersion
+- Represents: one tool/version record in LC_BUILD_VERSION.
+- Range: the tool record bytes in the command.
+- Containment: owned by its BuildVersionCommand.
+
 ## Containment Semantics
 
 Containment edges are explicitly typed:
 
-- Owns: structural containment (e.g., File -> Slice, Slice -> MachHeader).
+- Owns: structural containment (e.g., File -> Slice, Slice -> MachHeader, MachHeader -> LoadCommandsRegion, LoadCommand -> Segment64Command).
 - Describes: metadata relationship (e.g., FatArchEntry -> Slice).
 
 These semantics do not add interpretation; they clarify structural roles.
@@ -66,8 +116,9 @@ These semantics do not add interpretation; they clarify structural roles.
 3. FAT vs thin classification
 4. Slice emission (from FAT entries or whole file)
 5. Mach-O header parsing at each slice start
-
-No load commands or higher-level parsing are performed yet.
+6. Load command region parsing and generic LoadCommand emission
+7. Typed load command refinement (segment64, symtab, dysymtab, uuid, build_version)
+8. Section and tool record emission within typed commands
 
 ## Determinism & Stability
 
