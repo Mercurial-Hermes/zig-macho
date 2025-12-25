@@ -12,6 +12,8 @@ pub const ParseResult = struct {
     fat_headers: std.ArrayList(types.FatHeader),
     fat_arch_entries: std.ArrayList(types.FatArchEntry),
     mach_headers: std.ArrayList(types.MachHeader),
+    load_cmd_regions: std.ArrayList(types.LoadCommandsRegion),
+    load_commands: std.ArrayList(types.LoadCommand),
     slice_entities: std.ArrayList(types.EntityId),
 
     pub fn init(allocator: std.mem.Allocator) ParseResult {
@@ -24,6 +26,8 @@ pub const ParseResult = struct {
             .fat_headers = std.ArrayList(types.FatHeader).init(allocator),
             .fat_arch_entries = std.ArrayList(types.FatArchEntry).init(allocator),
             .mach_headers = std.ArrayList(types.MachHeader).init(allocator),
+            .load_cmd_regions = std.ArrayList(types.LoadCommandsRegion).init(allocator),
+            .load_commands = std.ArrayList(types.LoadCommand).init(allocator),
             .slice_entities = std.ArrayList(types.EntityId).init(allocator),
         };
     }
@@ -35,6 +39,8 @@ pub const ParseResult = struct {
         self.fat_headers.deinit();
         self.fat_arch_entries.deinit();
         self.mach_headers.deinit();
+        self.load_cmd_regions.deinit();
+        self.load_commands.deinit();
         self.slice_entities.deinit();
     }
 
@@ -71,6 +77,7 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
         .range = .{ .offset = 0, .size = stat.size },
     });
 
+    // Stage: file classification by magic.
     if (stat.size < 4) {
         const size = @min(stat.size, @as(u64, 4));
         try result.addDiagnostic(.invalid_magic, .Error, .{ .offset = 0, .size = size });
@@ -105,6 +112,7 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
         },
     }
 
+    // Stage: slice header parsing and load command description.
     try parseSliceHeaders(&result, file);
 
     return result;
@@ -295,6 +303,93 @@ fn parseSliceHeaders(result: *ParseResult, file: std.fs.File) !void {
             .endian = magic.endian,
             .entity = header_id,
         });
+
+        try parseLoadCommands(result, file, slice_entity, header_id, header_size, ncmds, sizeofcmds, magic.endian);
+    }
+}
+
+fn parseLoadCommands(
+    result: *ParseResult,
+    file: std.fs.File,
+    slice_entity: types.Entity,
+    header_id: types.EntityId,
+    header_size: u64,
+    ncmds: u32,
+    sizeofcmds: u32,
+    endian: types.Endianness,
+) !void {
+    const header_end = std.math.add(u64, slice_entity.range.offset, header_size) catch {
+        try result.addDiagnostic(.load_cmd_region_out_of_bounds, .Error, slice_entity.range);
+        return;
+    };
+    const region_size = @as(u64, sizeofcmds);
+    const region_end = std.math.add(u64, header_end, region_size) catch {
+        try result.addDiagnostic(.load_cmd_region_out_of_bounds, .Error, slice_entity.range);
+        return;
+    };
+
+    const region_id = try result.addEntity(.{
+        .kind = types.EntityKind.LoadCommandsRegion,
+        .range = .{ .offset = header_end, .size = region_size },
+    });
+    try result.addContainment(.Owns, header_id, region_id);
+    try result.load_cmd_regions.append(.{ .sizeofcmds = sizeofcmds, .entity = region_id });
+
+    const slice_end = std.math.add(u64, slice_entity.range.offset, slice_entity.range.size) catch {
+        try result.addDiagnostic(.load_cmd_region_out_of_bounds, .Error, slice_entity.range);
+        return;
+    };
+
+    if (region_end > slice_end) {
+        try result.addDiagnostic(.load_cmd_region_out_of_bounds, .Error, .{ .offset = header_end, .size = region_size });
+        return;
+    }
+
+    if (region_end > result.file_size) {
+        const remaining = if (header_end >= result.file_size) 0 else result.file_size - header_end;
+        try result.addDiagnostic(.load_cmd_region_truncated, .Error, .{ .offset = header_end, .size = remaining });
+        return;
+    }
+
+    const cmd_endian: std.builtin.Endian = if (endian == .big) .big else .little;
+    var offset: u64 = header_end;
+    var i: u32 = 0;
+    while (i < ncmds) : (i += 1) {
+        const header_bytes_end = std.math.add(u64, offset, 8) catch {
+            try result.addDiagnostic(.load_cmd_header_truncated, .Error, .{ .offset = offset, .size = 0 });
+            break;
+        };
+        if (header_bytes_end > region_end) {
+            const size = if (offset >= region_end) 0 else region_end - offset;
+            try result.addDiagnostic(.load_cmd_header_truncated, .Error, .{ .offset = offset, .size = size });
+            break;
+        }
+
+        const cmd = try readU32At(file, offset + 0, cmd_endian);
+        const cmdsize = try readU32At(file, offset + 4, cmd_endian);
+
+        if (cmdsize < 8) {
+            try result.addDiagnostic(.load_cmd_malformed_size, .Error, .{ .offset = offset, .size = cmdsize });
+            break;
+        }
+
+        const cmd_end = std.math.add(u64, offset, cmdsize) catch {
+            try result.addDiagnostic(.load_cmd_out_of_bounds, .Error, .{ .offset = offset, .size = cmdsize });
+            break;
+        };
+        if (cmd_end > region_end) {
+            try result.addDiagnostic(.load_cmd_out_of_bounds, .Error, .{ .offset = offset, .size = cmdsize });
+            break;
+        }
+
+        const cmd_id = try result.addEntity(.{
+            .kind = types.EntityKind.LoadCommand,
+            .range = .{ .offset = offset, .size = cmdsize },
+        });
+        try result.addContainment(.Owns, region_id, cmd_id);
+        try result.load_commands.append(.{ .cmd = cmd, .cmdsize = cmdsize, .entity = cmd_id });
+
+        offset = cmd_end;
     }
 }
 

@@ -305,6 +305,209 @@ test "thin: slice owns mach header containment" {
     try std.testing.expect(hasContainment(&result, .Owns, slice_id, header_id));
 }
 
+test "thin: load command region and commands are ordered" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const cmd0_size: u32 = 8;
+    const cmd1_size: u32 = 12;
+    const sizeofcmds: u32 = cmd0_size + cmd1_size;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 2, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+
+    const cmd0_offset = header_size;
+    writeU32(buf, cmd0_offset + 0, 0x1, .big);
+    writeU32(buf, cmd0_offset + 4, cmd0_size, .big);
+
+    const cmd1_offset = cmd0_offset + cmd0_size;
+    writeU32(buf, cmd1_offset + 0, 0x2, .big);
+    writeU32(buf, cmd1_offset + 4, cmd1_size, .big);
+
+    const path = try writeTempFile(tmp, allocator, "loadcmds.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.load_cmd_regions.items.len);
+    try std.testing.expectEqual(@as(usize, 2), result.load_commands.items.len);
+
+    const region_entity = entityAt(&result, result.load_cmd_regions.items[0].entity);
+    try std.testing.expectEqual(@as(u64, header_size), region_entity.range.offset);
+    try std.testing.expectEqual(@as(u64, sizeofcmds), region_entity.range.size);
+
+    const cmd0_entity = entityAt(&result, result.load_commands.items[0].entity);
+    const cmd1_entity = entityAt(&result, result.load_commands.items[1].entity);
+    try std.testing.expectEqual(@as(u64, cmd0_offset), cmd0_entity.range.offset);
+    try std.testing.expectEqual(@as(u64, cmd0_size), cmd0_entity.range.size);
+    try std.testing.expectEqual(@as(u64, cmd1_offset), cmd1_entity.range.offset);
+    try std.testing.expectEqual(@as(u64, cmd1_size), cmd1_entity.range.size);
+}
+
+test "thin: load command region owns load commands" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const cmd0_size: u32 = 8;
+    const cmd1_size: u32 = 12;
+    const sizeofcmds: u32 = cmd0_size + cmd1_size;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 2, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+
+    const cmd0_offset = header_size;
+    writeU32(buf, cmd0_offset + 0, 0x1, .big);
+    writeU32(buf, cmd0_offset + 4, cmd0_size, .big);
+
+    const cmd1_offset = cmd0_offset + cmd0_size;
+    writeU32(buf, cmd1_offset + 0, 0x2, .big);
+    writeU32(buf, cmd1_offset + 4, cmd1_size, .big);
+
+    const path = try writeTempFile(tmp, allocator, "loadcmds_owns.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.load_cmd_regions.items.len);
+    try std.testing.expectEqual(@as(usize, 2), result.load_commands.items.len);
+
+    const region_id = result.load_cmd_regions.items[0].entity;
+    const cmd0_id = result.load_commands.items[0].entity;
+    const cmd1_id = result.load_commands.items[1].entity;
+
+    try std.testing.expect(hasContainment(&result, .Owns, region_id, cmd0_id));
+    try std.testing.expect(hasContainment(&result, .Owns, region_id, cmd1_id));
+}
+
+test "thin: load command region out of bounds emits diagnostic" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const buf = try allocator.alloc(u8, 28);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, 16, .big);
+    writeU32(buf, 24, 0, .big);
+
+    const path = try writeTempFile(tmp, allocator, "region_oob.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.load_cmd_regions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.load_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.items.len);
+    try std.testing.expectEqual(macho.types.DiagnosticCode.load_cmd_region_out_of_bounds, result.diagnostics.items[0].code);
+}
+
+test "thin: malformed load command size emits diagnostic" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const sizeofcmds: u32 = 16;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+
+    writeU32(buf, header_size + 0, 0x1, .big);
+    writeU32(buf, header_size + 4, 4, .big);
+
+    const path = try writeTempFile(tmp, allocator, "cmdsize_bad.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.load_cmd_regions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.load_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.items.len);
+    try std.testing.expectEqual(macho.types.DiagnosticCode.load_cmd_malformed_size, result.diagnostics.items[0].code);
+}
+
+test "thin: truncated load command header emits diagnostic" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const sizeofcmds: u32 = 4;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, sizeofcmds, .big);
+    writeU32(buf, 24, 0, .big);
+
+    const path = try writeTempFile(tmp, allocator, "cmdheader_trunc.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.load_cmd_regions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.load_commands.items.len);
+    try std.testing.expectEqual(@as(usize, 1), result.diagnostics.items.len);
+    try std.testing.expectEqual(macho.types.DiagnosticCode.load_cmd_header_truncated, result.diagnostics.items[0].code);
+}
+
 test "fat: invalid mach header magic emits diagnostic" {
     const allocator = std.testing.allocator;
 

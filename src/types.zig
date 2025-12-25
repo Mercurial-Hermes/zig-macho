@@ -9,6 +9,8 @@ pub const EntityKind = enum(u8) {
     FatArchEntry = 2,
     Slice = 3,
     MachHeader = 4,
+    LoadCommandsRegion = 5,
+    LoadCommand = 6,
 };
 
 pub const EntityId = extern struct {
@@ -30,6 +32,11 @@ pub const DiagnosticCode = enum(u8) {
     invalid_mach_magic = 7,
     mach_header_truncated = 8,
     mach_header_out_of_bounds = 9,
+    load_cmd_region_out_of_bounds = 10,
+    load_cmd_region_truncated = 11,
+    load_cmd_header_truncated = 12,
+    load_cmd_malformed_size = 13,
+    load_cmd_out_of_bounds = 14,
 };
 
 pub const DiagnosticSeverity = enum(u8) {
@@ -89,5 +96,16 @@ pub const MachHeader = extern struct {
     reserved: u32,
     is_64: u8,
     endian: Endianness,
+    entity: EntityId,
+};
+
+pub const LoadCommandsRegion = extern struct {
+    sizeofcmds: u32,
+    entity: EntityId,
+};
+
+pub const LoadCommand = extern struct {
+    cmd: u32,
+    cmdsize: u32,
     entity: EntityId,
 };
