@@ -26,9 +26,21 @@ pub const EntityId = extern struct {
     index: u32,
 };
 
+pub const StructuralIdentityId = extern struct {
+    index: u32,
+};
+
+pub const StructuralIdentity = extern struct {
+    parent: StructuralIdentityId,
+    kind: EntityKind,
+    ordinal: u32,
+    entity: EntityId,
+};
+
 pub const Entity = extern struct {
     kind: EntityKind,
     range: ByteRange,
+    identity: StructuralIdentityId,
 };
 
 pub const DiagnosticCode = enum(u8) {

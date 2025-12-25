@@ -16,6 +16,9 @@ pub const ZmParseView = extern struct {
     entities: ?[*]const types.Entity,
     entities_len: usize,
 
+    identities: ?[*]const types.StructuralIdentity,
+    identities_len: usize,
+
     diagnostics: ?[*]const types.Diagnostic,
     diagnostics_len: usize,
 
@@ -68,6 +71,8 @@ fn fillView(result: *const macho.ParseResult, out: *ZmParseView) void {
         .file_size = result.file_size,
         .entities = slicePtr(types.Entity, result.entities.items),
         .entities_len = result.entities.items.len,
+        .identities = slicePtr(types.StructuralIdentity, result.identities.items),
+        .identities_len = result.identities.items.len,
         .diagnostics = slicePtr(types.Diagnostic, result.diagnostics.items),
         .diagnostics_len = result.diagnostics.items.len,
         .containments = slicePtr(types.Containment, result.containments.items),

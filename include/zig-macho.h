@@ -72,9 +72,21 @@ typedef struct EntityId {
     uint32_t index;
 } EntityId;
 
+typedef struct StructuralIdentityId {
+    uint32_t index;
+} StructuralIdentityId;
+
+typedef struct StructuralIdentity {
+    StructuralIdentityId parent;
+    EntityKind kind;
+    uint32_t ordinal;
+    EntityId entity;
+} StructuralIdentity;
+
 typedef struct Entity {
     EntityKind kind;
     ByteRange range;
+    StructuralIdentityId identity;
 } Entity;
 
 typedef struct Diagnostic {
@@ -292,6 +304,9 @@ typedef struct ZmParseView {
 
     const Entity *entities;
     size_t entities_len;
+
+    const StructuralIdentity *identities;
+    size_t identities_len;
 
     const Diagnostic *diagnostics;
     size_t diagnostics_len;

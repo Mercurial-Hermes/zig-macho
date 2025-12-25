@@ -102,9 +102,13 @@ Ordering exists to support rendering, traversal, and animation.
 
 ## Identity Stability
 
-Structural identities are derived from containment and sibling ordering.
+Structural identities are derived from:
 
-Identity stability is an explicit design goal and will be guaranteed starting in v0.0.6.
+* Parent identity
+* Entity kind
+* Ordinal position among siblings after structural closure
+
+Identity stability is guaranteed starting in v0.0.6.
 
 Prior to v0.0.6, entity ordering may change as structural closure logic is introduced.
 

@@ -56,6 +56,7 @@ fn parseSegment64(
     const segment_id = try result.addEntity(.{
         .kind = types.EntityKind.Segment64Command,
         .range = .{ .offset = cmd_offset, .size = fixed_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, cmd_id, segment_id);
 
@@ -116,6 +117,7 @@ fn parseSegment64(
         const section_id = try result.addEntity(.{
             .kind = types.EntityKind.Section64,
             .range = .{ .offset = sect_offset, .size = section_size },
+            .identity = .{ .index = 0 },
         });
         try result.addContainment(.Owns, segment_id, section_id);
 
@@ -174,6 +176,7 @@ fn parseSymtab(
     const sym_id = try result.addEntity(.{
         .kind = types.EntityKind.SymtabCommand,
         .range = .{ .offset = cmd_offset, .size = fixed_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, cmd_id, sym_id);
 
@@ -232,6 +235,7 @@ fn parseDysymtab(
     const dysym_id = try result.addEntity(.{
         .kind = types.EntityKind.DysymtabCommand,
         .range = .{ .offset = cmd_offset, .size = fixed_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, cmd_id, dysym_id);
 
@@ -301,6 +305,7 @@ fn parseUuid(
     const uuid_id = try result.addEntity(.{
         .kind = types.EntityKind.UuidCommand,
         .range = .{ .offset = cmd_offset, .size = fixed_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, cmd_id, uuid_id);
 
@@ -339,6 +344,7 @@ fn parseBuildVersion(
     const build_id = try result.addEntity(.{
         .kind = types.EntityKind.BuildVersionCommand,
         .range = .{ .offset = cmd_offset, .size = fixed_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, cmd_id, build_id);
 
@@ -377,6 +383,7 @@ fn parseBuildVersion(
         const tool_id = try result.addEntity(.{
             .kind = types.EntityKind.BuildToolVersion,
             .range = .{ .offset = tool_offset, .size = tool_size },
+            .identity = .{ .index = 0 },
         });
         try result.addContainment(.Owns, build_id, tool_id);
 

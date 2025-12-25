@@ -90,6 +90,21 @@ fn collectChildRanges(
     return list;
 }
 
+fn collectChildIdentities(
+    allocator: std.mem.Allocator,
+    result: *const macho.ParseResult,
+    parent: macho.types.EntityId,
+) !std.ArrayList(macho.types.StructuralIdentity) {
+    var list = std.ArrayList(macho.types.StructuralIdentity).init(allocator);
+    for (result.containments.items) |edge| {
+        if (edge.parent.index != parent.index) continue;
+        const child = result.entities.items[@intCast(edge.child.index)];
+        const identity = result.identities.items[@intCast(child.identity.index)];
+        try list.append(identity);
+    }
+    return list;
+}
+
 fn coversRange(ranges: []macho.types.ByteRange, container: macho.types.ByteRange) bool {
     if (ranges.len == 0) return false;
     std.sort.heap(macho.types.ByteRange, ranges, {}, struct {
@@ -870,6 +885,239 @@ test "fat: file gaps cover unused space" {
     defer ranges.deinit();
 
     try std.testing.expect(coversRange(ranges.items, file_entity.range));
+}
+
+test "identity: stable across repeated parses" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const cmdsize: u32 = 16;
+    const file_size: usize = header_size + cmdsize;
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 1, .big);
+    writeU32(buf, 20, cmdsize, .big);
+    writeU32(buf, 24, 0, .big);
+    writeU32(buf, header_size + 0, 0x1, .big);
+    writeU32(buf, header_size + 4, 8, .big);
+
+    const path = try writeTempFile(tmp, allocator, "identity.bin", buf);
+    defer allocator.free(path);
+
+    var first = try macho.parseFile(allocator, path);
+    defer first.deinit();
+    var second = try macho.parseFile(allocator, path);
+    defer second.deinit();
+
+    try std.testing.expectEqual(first.entities.items.len, second.entities.items.len);
+    try std.testing.expectEqual(first.identities.items.len, second.identities.items.len);
+
+    var i: usize = 0;
+    while (i < first.entities.items.len) : (i += 1) {
+        const a = first.entities.items[i];
+        const b = second.entities.items[i];
+        try std.testing.expectEqual(a.identity.index, b.identity.index);
+        const aid = first.identities.items[@intCast(a.identity.index)];
+        const bid = second.identities.items[@intCast(b.identity.index)];
+        try std.testing.expectEqual(aid.parent.index, bid.parent.index);
+        try std.testing.expectEqual(aid.kind, bid.kind);
+        try std.testing.expectEqual(aid.ordinal, bid.ordinal);
+    }
+}
+
+test "identity: sibling order affects ordinal" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const header_size: usize = 28;
+    const cmd0_size: u32 = 8;
+    const cmd1_size: u32 = 8;
+    const sizeofcmds: u32 = cmd0_size + cmd1_size;
+    const file_size: usize = header_size + sizeofcmds;
+
+    const buf_a = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf_a);
+    @memset(buf_a, 0);
+    writeU32(buf_a, 0, 0xfeedface, .big);
+    writeU32(buf_a, 4, 0x0100000c, .big);
+    writeU32(buf_a, 8, 0, .big);
+    writeU32(buf_a, 12, 2, .big);
+    writeU32(buf_a, 16, 2, .big);
+    writeU32(buf_a, 20, sizeofcmds, .big);
+    writeU32(buf_a, 24, 0, .big);
+    writeU32(buf_a, header_size + 0, 0x1, .big);
+    writeU32(buf_a, header_size + 4, cmd0_size, .big);
+    writeU32(buf_a, header_size + 8, 0x2, .big);
+    writeU32(buf_a, header_size + 12, cmd1_size, .big);
+
+    const buf_b = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf_b);
+    @memset(buf_b, 0);
+    writeU32(buf_b, 0, 0xfeedface, .big);
+    writeU32(buf_b, 4, 0x0100000c, .big);
+    writeU32(buf_b, 8, 0, .big);
+    writeU32(buf_b, 12, 2, .big);
+    writeU32(buf_b, 16, 2, .big);
+    writeU32(buf_b, 20, sizeofcmds, .big);
+    writeU32(buf_b, 24, 0, .big);
+    writeU32(buf_b, header_size + 0, 0x2, .big);
+    writeU32(buf_b, header_size + 4, cmd0_size, .big);
+    writeU32(buf_b, header_size + 8, 0x1, .big);
+    writeU32(buf_b, header_size + 12, cmd1_size, .big);
+
+    const path_a = try writeTempFile(tmp, allocator, "order_a.bin", buf_a);
+    defer allocator.free(path_a);
+    const path_b = try writeTempFile(tmp, allocator, "order_b.bin", buf_b);
+    defer allocator.free(path_b);
+
+    var first = try macho.parseFile(allocator, path_a);
+    defer first.deinit();
+    var second = try macho.parseFile(allocator, path_b);
+    defer second.deinit();
+
+    const ord_a_cmd1 = blk: {
+        for (first.load_commands.items) |cmd| {
+            if (cmd.cmd == 0x1) {
+                const entity = first.entities.items[@intCast(cmd.entity.index)];
+                const identity = first.identities.items[@intCast(entity.identity.index)];
+                break :blk identity.ordinal;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+    const ord_a_cmd2 = blk: {
+        for (first.load_commands.items) |cmd| {
+            if (cmd.cmd == 0x2) {
+                const entity = first.entities.items[@intCast(cmd.entity.index)];
+                const identity = first.identities.items[@intCast(entity.identity.index)];
+                break :blk identity.ordinal;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+    const ord_b_cmd1 = blk: {
+        for (second.load_commands.items) |cmd| {
+            if (cmd.cmd == 0x1) {
+                const entity = second.entities.items[@intCast(cmd.entity.index)];
+                const identity = second.identities.items[@intCast(entity.identity.index)];
+                break :blk identity.ordinal;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+    const ord_b_cmd2 = blk: {
+        for (second.load_commands.items) |cmd| {
+            if (cmd.cmd == 0x2) {
+                const entity = second.entities.items[@intCast(cmd.entity.index)];
+                const identity = second.identities.items[@intCast(entity.identity.index)];
+                break :blk identity.ordinal;
+            }
+        }
+        return error.TestUnexpectedResult;
+    };
+
+    try std.testing.expectEqual(@as(u32, 0), ord_a_cmd1);
+    try std.testing.expectEqual(@as(u32, 1), ord_a_cmd2);
+    try std.testing.expectEqual(@as(u32, 1), ord_b_cmd1);
+    try std.testing.expectEqual(@as(u32, 0), ord_b_cmd2);
+}
+
+test "identity: malformed binaries remain stable" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const buf = try allocator.alloc(u8, 16);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+    writeU32(buf, 0, 0xfeedface, .big);
+
+    const path = try writeTempFile(tmp, allocator, "malformed.bin", buf);
+    defer allocator.free(path);
+
+    var first = try macho.parseFile(allocator, path);
+    defer first.deinit();
+    var second = try macho.parseFile(allocator, path);
+    defer second.deinit();
+
+    try std.testing.expectEqual(first.entities.items.len, second.entities.items.len);
+    try std.testing.expectEqual(first.identities.items.len, second.identities.items.len);
+    var i: usize = 0;
+    while (i < first.entities.items.len) : (i += 1) {
+        const a = first.entities.items[i];
+        const b = second.entities.items[i];
+        try std.testing.expectEqual(a.identity.index, b.identity.index);
+        const aid = first.identities.items[@intCast(a.identity.index)];
+        const bid = second.identities.items[@intCast(b.identity.index)];
+        try std.testing.expectEqual(aid.parent.index, bid.parent.index);
+        try std.testing.expectEqual(aid.kind, bid.kind);
+        try std.testing.expectEqual(aid.ordinal, bid.ordinal);
+    }
+}
+
+test "identity: gap participates in sibling ordering" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file_size: usize = 64;
+    const buf = try allocator.alloc(u8, file_size);
+    defer allocator.free(buf);
+    @memset(buf, 0);
+
+    writeU32(buf, 0, 0xfeedface, .big);
+    writeU32(buf, 4, 0x0100000c, .big);
+    writeU32(buf, 8, 0, .big);
+    writeU32(buf, 12, 2, .big);
+    writeU32(buf, 16, 0, .big);
+    writeU32(buf, 20, 0, .big);
+    writeU32(buf, 24, 0, .big);
+
+    const path = try writeTempFile(tmp, allocator, "gap_order.bin", buf);
+    defer allocator.free(path);
+
+    var result = try macho.parseFile(allocator, path);
+    defer result.deinit();
+
+    const slice_id = result.slice_entities.items[0];
+    const slice_entity = result.entities.items[@intCast(slice_id.index)];
+    var gap_entity_id: ?macho.types.EntityId = null;
+    for (result.entities.items, 0..) |entity, idx| {
+        if (entity.kind != macho.types.EntityKind.Gap) continue;
+        if (entity.range.offset == 28 and entity.range.size == 36) {
+            gap_entity_id = .{ .index = @intCast(idx) };
+            break;
+        }
+    }
+    const gap_id = gap_entity_id orelse return error.TestUnexpectedResult;
+
+    var child_identities = try collectChildIdentities(allocator, &result, slice_id);
+    defer child_identities.deinit();
+    try std.testing.expect(child_identities.items.len >= 2);
+
+    var gap_identity: ?macho.types.StructuralIdentity = null;
+    for (child_identities.items) |identity| {
+        if (identity.entity.index == gap_id.index) {
+            gap_identity = identity;
+            break;
+        }
+    }
+    const gap_ident = gap_identity orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1), gap_ident.ordinal);
+    _ = slice_entity;
 }
 
 test "thin: load command region out of bounds emits diagnostic" {

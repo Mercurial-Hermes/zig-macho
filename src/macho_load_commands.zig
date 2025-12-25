@@ -26,6 +26,7 @@ pub fn parseLoadCommands(
     const region_id = try result.addEntity(.{
         .kind = types.EntityKind.LoadCommandsRegion,
         .range = .{ .offset = header_end, .size = region_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, header_id, region_id);
     try result.load_cmd_regions.append(.{ .sizeofcmds = sizeofcmds, .entity = region_id });
@@ -86,6 +87,7 @@ pub fn parseLoadCommands(
         const cmd_id = try result.addEntity(.{
             .kind = types.EntityKind.LoadCommand,
             .range = .{ .offset = offset, .size = cmdsize },
+            .identity = .{ .index = 0 },
         });
         try result.addContainment(.Owns, region_id, cmd_id);
         try result.load_commands.append(.{ .cmd = cmd, .cmdsize = cmdsize, .entity = cmd_id });
@@ -98,6 +100,7 @@ pub fn parseLoadCommands(
                 const pad_id = try result.addEntity(.{
                     .kind = types.EntityKind.LoadCommandPadding,
                     .range = .{ .offset = pad_offset, .size = pad_size },
+                    .identity = .{ .index = 0 },
                 });
                 try result.addContainment(.Owns, cmd_id, pad_id);
             }
@@ -117,6 +120,7 @@ fn emitRegionPadding(result: anytype, region_id: types.EntityId, offset: u64, re
     const pad_id = try result.addEntity(.{
         .kind = types.EntityKind.LoadCommandPadding,
         .range = .{ .offset = offset, .size = size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, region_id, pad_id);
 }

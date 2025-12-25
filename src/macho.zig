@@ -22,6 +22,7 @@ pub const ParseResult = struct {
     uuid_commands: std.ArrayList(types.UuidCommand),
     build_version_commands: std.ArrayList(types.BuildVersionCommand),
     build_tool_versions: std.ArrayList(types.BuildToolVersion),
+    identities: std.ArrayList(types.StructuralIdentity),
     slice_entities: std.ArrayList(types.EntityId),
 
     pub fn init(allocator: std.mem.Allocator) ParseResult {
@@ -43,6 +44,7 @@ pub const ParseResult = struct {
             .uuid_commands = std.ArrayList(types.UuidCommand).init(allocator),
             .build_version_commands = std.ArrayList(types.BuildVersionCommand).init(allocator),
             .build_tool_versions = std.ArrayList(types.BuildToolVersion).init(allocator),
+            .identities = std.ArrayList(types.StructuralIdentity).init(allocator),
             .slice_entities = std.ArrayList(types.EntityId).init(allocator),
         };
     }
@@ -63,6 +65,7 @@ pub const ParseResult = struct {
         self.uuid_commands.deinit();
         self.build_version_commands.deinit();
         self.build_tool_versions.deinit();
+        self.identities.deinit();
         self.slice_entities.deinit();
     }
 
@@ -97,6 +100,7 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
     const file_id = try result.addEntity(.{
         .kind = types.EntityKind.File,
         .range = .{ .offset = 0, .size = stat.size },
+        .identity = .{ .index = 0 },
     });
 
     // Stage: file classification by magic.
@@ -125,6 +129,7 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
             const slice_id = try result.addEntity(.{
                 .kind = types.EntityKind.Slice,
                 .range = .{ .offset = 0, .size = stat.size },
+                .identity = .{ .index = 0 },
             });
             try result.addContainment(.Owns, file_id, slice_id);
             try result.slice_entities.append(slice_id);
@@ -139,6 +144,7 @@ pub fn parseFile(allocator: std.mem.Allocator, path: []const u8) !ParseResult {
 
     // Stage: structural closure (gaps and ordering).
     try emitGaps(&result);
+    try assignIdentities(&result);
 
     return result;
 }
@@ -169,6 +175,7 @@ fn parseFat(result: *ParseResult, file: std.fs.File, file_id: types.EntityId, ma
     const header_id = try result.addEntity(.{
         .kind = types.EntityKind.FatHeader,
         .range = .{ .offset = 0, .size = header_size },
+        .identity = .{ .index = 0 },
     });
     try result.addContainment(.Owns, file_id, header_id);
 
@@ -203,6 +210,7 @@ fn parseFat(result: *ParseResult, file: std.fs.File, file_id: types.EntityId, ma
         const entry_id = try result.addEntity(.{
             .kind = types.EntityKind.FatArchEntry,
             .range = .{ .offset = entry_offset, .size = entry_size },
+            .identity = .{ .index = 0 },
         });
         try result.addContainment(.Owns, file_id, entry_id);
 
@@ -228,6 +236,7 @@ fn parseFat(result: *ParseResult, file: std.fs.File, file_id: types.EntityId, ma
         const slice_id = try result.addEntity(.{
             .kind = types.EntityKind.Slice,
             .range = .{ .offset = offset, .size = size },
+            .identity = .{ .index = 0 },
         });
         try result.addContainment(.Owns, file_id, slice_id);
         try result.slice_entities.append(slice_id);
@@ -312,6 +321,7 @@ fn parseSliceHeaders(result: *ParseResult, file: std.fs.File) !void {
         const header_id = try result.addEntity(.{
             .kind = types.EntityKind.MachHeader,
             .range = .{ .offset = slice_offset, .size = header_size },
+            .identity = .{ .index = 0 },
         });
         try result.addContainment(.Owns, slice_id, header_id);
 
@@ -401,6 +411,7 @@ fn emitGaps(result: *ParseResult) !void {
                 const gap_id = try result.addEntity(.{
                     .kind = types.EntityKind.Gap,
                     .range = .{ .offset = cursor, .size = clamped_start - cursor },
+                    .identity = .{ .index = 0 },
                 });
                 try result.addContainment(.Owns, .{ .index = @intCast(i) }, gap_id);
             }
@@ -410,6 +421,7 @@ fn emitGaps(result: *ParseResult) !void {
             const gap_id = try result.addEntity(.{
                 .kind = types.EntityKind.Gap,
                 .range = .{ .offset = cursor, .size = parent_end - cursor },
+                .identity = .{ .index = 0 },
             });
             try result.addContainment(.Owns, .{ .index = @intCast(i) }, gap_id);
         }
@@ -467,6 +479,73 @@ fn reorderContainments(result: *ParseResult) !void {
 
     result.containments.deinit();
     result.containments = new_list;
+}
+
+fn assignIdentities(result: *ParseResult) !void {
+    const allocator = result.allocator;
+    result.identities.clearRetainingCapacity();
+
+    const entities_len = result.entities.items.len;
+    var children = try allocator.alloc(std.ArrayList(types.EntityId), entities_len);
+    defer {
+        var idx: usize = 0;
+        while (idx < entities_len) : (idx += 1) {
+            children[idx].deinit();
+        }
+        allocator.free(children);
+    }
+
+    var i: usize = 0;
+    while (i < entities_len) : (i += 1) {
+        children[i] = std.ArrayList(types.EntityId).init(allocator);
+    }
+
+    for (result.containments.items) |edge| {
+        const parent_index: usize = @intCast(edge.parent.index);
+        if (parent_index >= entities_len) continue;
+        try children[parent_index].append(edge.child);
+    }
+
+    const root_entity: types.EntityId = .{ .index = 0 };
+    const root_parent: types.StructuralIdentityId = .{ .index = std.math.maxInt(u32) };
+    const root_identity = types.StructuralIdentity{
+        .parent = root_parent,
+        .kind = types.EntityKind.File,
+        .ordinal = 0,
+        .entity = root_entity,
+    };
+    try result.identities.append(root_identity);
+    result.entities.items[0].identity = .{ .index = 0 };
+
+    try assignChildIdentities(result, children, root_entity, result.entities.items[0].identity);
+}
+
+fn assignChildIdentities(
+    result: *ParseResult,
+    children: []std.ArrayList(types.EntityId),
+    parent_entity: types.EntityId,
+    parent_identity: types.StructuralIdentityId,
+) !void {
+    const parent_index: usize = @intCast(parent_entity.index);
+    if (parent_index >= children.len) return;
+
+    var ordinal: u32 = 0;
+    for (children[parent_index].items) |child_entity| {
+        const child_index: usize = @intCast(child_entity.index);
+        const child = result.entities.items[child_index];
+        const identity = types.StructuralIdentity{
+            .parent = parent_identity,
+            .kind = child.kind,
+            .ordinal = ordinal,
+            .entity = child_entity,
+        };
+        const identity_index: u32 = @intCast(result.identities.items.len);
+        try result.identities.append(identity);
+        result.entities.items[child_index].identity = .{ .index = identity_index };
+
+        ordinal += 1;
+        try assignChildIdentities(result, children, child_entity, .{ .index = identity_index });
+    }
 }
 
 fn magicValue(magic: Magic) u32 {
